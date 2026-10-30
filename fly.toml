@@ -24,8 +24,8 @@ primary_region = "sin"   # สิงคโปร์ ใกล้ไทยที�
   min_machines_running = 0
 
 [[vm]]
-  # ถ้าภาพยังกระตุกลองเปลี่ยนเป็น "performance-4x" (แพงขึ้น)
-  size = "performance-2x"
+  size = "shared-cpu-4x"
+  memory = "4gb"
 
 [[restart]]
   policy = "on-failure"
