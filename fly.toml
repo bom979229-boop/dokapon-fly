@@ -24,7 +24,7 @@ primary_region = "sin"   # สิงคโปร์ ใกล้ไทยที�
   min_machines_running = 0
 
 [[vm]]
-  size = "shared-cpu-4x"
+  size = "shared-cpu-2x"
   memory = "4gb"
 
 [[restart]]
