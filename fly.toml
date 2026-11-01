@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for dokapon-bom-007 on 2026-10-30T03:05:54Z
+# fly.toml app configuration file generated for dokapon-fly on 2026-11-01T05:14:26Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'dokapon-bom-007'
-primary_region = 'sin'
+app = 'dokapon-fly'
+primary_region = 'ams'
 
 [build]
   dockerfile = 'Dockerfile'
