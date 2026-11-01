@@ -81,8 +81,7 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
 <div id="join">
   <form id="joinForm" autocomplete="off">
     <h1>เข้าห้อง Dokapon</h1>
-    <p>ใส่รหัสห้องที่เพื่อนส่งให้ แล้วกดเข้าห้อง จอเกมจะขึ้นมาทันทีที่เครื่องเกมพร้อม</p>
-    <p id="srv" style="color:#f2c14e"></p>
+    <p>ใส่รหัสห้องที่เพื่อนส่งให้ แล้วกดเข้าห้อง จอเกมจะขึ้นมาทันทีที่โฮสต์เริ่มสตรีม</p>
     <label>รหัสห้อง<input id="code" maxlength="6" inputmode="text" autocapitalize="characters" required></label>
     <label>ชื่อของคุณ<input id="name" maxlength="20" placeholder="เช่น Bom"></label>
     <button class="primary" id="joinBtn" type="submit">เข้าห้อง</button>
@@ -129,46 +128,32 @@ video{width:100%;height:100%;object-fit:contain;background:#000}
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
-// รหัสปุ่มตามมาตรฐาน libretro RetroPad
-// 0=✕(B) 1=□(Y) 2=Select 3=Start 4=ขึ้น 5=ลง 6=ซ้าย 7=ขวา 8=○(A) 9=△(X) 10=L1 11=R1 12=L2 13=R2
+// หน้าเพื่อนสำหรับโหมด "โฮสต์เป็นแอปบนมือถือ"
+// ใช้เซิร์ฟเวอร์ฟรีของ PeerJS เป็นแค่ตัวส่งต่อข้อความจับคู่ ภาพวิ่งตรงมาจากมือถือโฮสต์ด้วย WebRTC
+// รหัสปุ่มแบบ RetroPad: 0=✕ 1=□ 2=Select 3=Start 4=ขึ้น 5=ลง 6=ซ้าย 7=ขวา 8=○ 9=△ 10=L1 11=R1 12=L2 13=R2
+const SIGNAL = 'wss://0.peerjs.com/peerjs?key=peerjs';
+const ICE = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'turn:eu-0.turn.peerjs.com:3478', username: 'peerjs', credential: 'peerjsp' },
+];
 const $ = (id) => document.getElementById(id);
 const v = $('v');
-let peer = null, conn = null, wl = null;
+let ws = null, pc = null, dc = null, hb = null, hostId = '', joined = false, chain = Promise.resolve(), pending = [], wl = null;
 
 const params = new URLSearchParams(location.search);
 if (params.get('room')) $('code').value = params.get('room').toUpperCase();
-try { $('name').value = localStorage.getItem('dokapon-name') || ''; } catch {}
+try { $('name').value = localStorage.getItem('dokapon-name') || ''; } catch (e) {}
 
-// ---- โหมดคลาวด์: ดูสถานะเครื่องเกม + keepalive ----
-let polls = 0;
-async function pollStatus() {
-  if (!$('game').classList.contains('hidden') || polls++ > 45) return;
-  try {
-    const j = await (await fetch('/status', { cache: 'no-store' })).json();
-    $('srv').textContent = j.ready ? 'เครื่องเกมพร้อมแล้ว เข้าห้องได้เลย' : j.hasGame ? 'กำลังเตรียมเกม รอประมาณ 1 นาที…' : 'โฮสต์ยังไม่ได้อัปโหลดไฟล์เกม';
-  } catch (e) { $('srv').textContent = 'กำลังปลุกเครื่อง รอสักครู่…'; }
-  setTimeout(pollStatus, 4000);
+function rnd(n) {
+  const a = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  return Array.from(crypto.getRandomValues(new Uint8Array(n)), (x) => a[x % a.length]).join('');
 }
-pollStatus();
-let ka = null, kaTimer = null;
-function keepAlive() {
-  try {
-    ka = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/keepalive');
-    ka.onopen = () => { kaTimer = setInterval(() => { try { ka.send('p'); } catch (e) {} }, 20000); };
-    ka.onclose = (e) => { clearInterval(kaTimer); if (e.code !== 4000) setTimeout(keepAlive, 3000); };
-  } catch (e) {}
+function send(type, payload) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type, dst: hostId, payload }));
 }
-
-function send(o) { if (conn && conn.open) conn.send(o); }
 function setStatus(t) { $('status').textContent = t; $('status').classList.toggle('hidden', !t); }
-
-async function keepAwake() { try { if ('wakeLock' in navigator) wl = await navigator.wakeLock.request('screen'); } catch {} }
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) [...held].forEach((b) => setBtn(b, false));
-  else if (!$('game').classList.contains('hidden')) keepAwake();
-});
+async function keepAwake() { try { if ('wakeLock' in navigator) wl = await navigator.wakeLock.request('screen'); } catch (e) {} }
 
 $('joinForm').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -176,93 +161,97 @@ $('joinForm').addEventListener('submit', (e) => {
   const room = $('code').value.trim().toUpperCase();
   const name = $('name').value.trim();
   if (!room) return;
-  try { localStorage.setItem('dokapon-name', name); } catch {}
+  try { localStorage.setItem('dokapon-name', name); } catch (e2) {}
+  hostId = 'dokapon-' + room;
   $('joinBtn').disabled = true;
   $('joinBtn').textContent = 'กำลังเชื่อมต่อ…';
 
-  peer = new Peer();
-  peer.on('open', () => {
-    conn = peer.connect('dokapon-' + room, { reliable: true });
-    conn.on('open', () => send({ type: 'join', name }));
-    conn.on('data', onData);
-    conn.on('close', () => fail('หลุดการเชื่อมต่อกับโฮสต์'));
-    conn.on('error', () => fail('เชื่อมต่อห้องไม่ได้'));
-  });
-  peer.on('call', (call) => {
-    call.answer();
-    call.on('stream', (s) => {
-      v.srcObject = s;
-      try {
-        call.peerConnection.getReceivers().forEach((r) => {
-          if ('playoutDelayHint' in r) r.playoutDelayHint = 0;
-          if ('jitterBufferTarget' in r) r.jitterBufferTarget = 0;
-        });
-        call.peerConnection.oniceconnectionstatechange = () => {
-          const st = call.peerConnection.iceConnectionState;
-          if (st === 'failed') setStatus('เชื่อมต่อภาพไม่สำเร็จ ลองสลับ Wi-Fi/เน็ตมือถือ');
-          else if (st === 'disconnected') setStatus('สัญญาณสะดุด กำลังพยายามต่อใหม่…');
-          else if (st === 'connected' || st === 'completed') setStatus('');
-        };
-      } catch {}
-      setStatus('');
-      tryPlay();
-    });
-  });
-  peer.on('error', (err) => {
-    if (err.type === 'peer-unavailable') fail('ไม่พบห้องนี้ ตรวจรหัสห้อง หรือรอสักครู่ถ้าเครื่องเกมเพิ่งเริ่มทำงาน แล้วลองใหม่');
-    else fail('เชื่อมต่อไม่ได้ (' + err.type + ')');
-  });
+  ws = new WebSocket(SIGNAL + '&id=friend-' + rnd(10) + '&token=' + rnd(12));
+  ws.onopen = () => { hb = setInterval(() => { if (ws.readyState === 1) ws.send('{"type":"HEARTBEAT"}'); }, 5000); };
+  ws.onmessage = (ev) => { try { onMsg(JSON.parse(ev.data), name); } catch (e3) { console.error(e3); } };
+  ws.onclose = () => { clearInterval(hb); if (joined) fail('หลุดการเชื่อมต่อ'); };
+  ws.onerror = () => fail('เชื่อมต่อเซิร์ฟเวอร์จับคู่ไม่ได้');
+  setTimeout(() => { if (!joined) fail('เข้าห้องไม่สำเร็จ ตรวจรหัสห้อง และตรวจว่าโฮสต์เปิดสตรีมแล้ว'); }, 20000);
 });
 
-function onData(m) {
-  if (!m || typeof m !== 'object') return;
-  if (m.type === 'joined') {
-    $('join').classList.add('hidden');
-    $('game').classList.remove('hidden');
-    $('badge').textContent = 'ผู้เล่น ' + (m.slot + 1);
-    setStatus('กำลังรอโฮสต์เริ่มสตรีม…');
-    keepAwake();
-    keepAlive();
-  } else if (m.type === 'error') {
-    fail(m.message);
+function onMsg(m, name) {
+  const p = m.payload || {};
+  if (m.type === 'OPEN') send('OFFER', { t: 'join', name });
+  else if (m.type === 'ID-TAKEN') fail('เชื่อมต่อชนกัน ลองใหม่อีกครั้ง');
+  else if (m.type === 'EXPIRE' && !joined) fail('ไม่พบห้องนี้ ตรวจรหัสห้อง หรือโฮสต์ยังไม่ได้เปิดสตรีม');
+  else if (m.type === 'ERROR') fail('เซิร์ฟเวอร์จับคู่แจ้งข้อผิดพลาด');
+  else if (m.type === 'ANSWER' && p.t === 'joined') showGame(p.slot);
+  else if (m.type === 'ANSWER' && p.t === 'full') fail('ห้องเต็มแล้ว');
+  else if (m.type === 'OFFER' && p.t === 'sdp') chain = chain.then(() => onOffer(p)).catch(console.error);
+  else if (m.type === 'CANDIDATE' && p.t === 'ice') {
+    const c = { candidate: p.candidate, sdpMid: p.sdpMid, sdpMLineIndex: p.sdpMLineIndex };
+    if (pc && pc.remoteDescription) pc.addIceCandidate(c).catch(() => {});
+    else pending.push(c);
   }
+}
+
+function showGame(slot) {
+  joined = true;
+  $('join').classList.add('hidden');
+  $('game').classList.remove('hidden');
+  $('badge').textContent = 'ผู้เล่น ' + (slot + 1);
+  setStatus('กำลังรอภาพจากโฮสต์…');
+  keepAwake();
 }
 
 function fail(msg) {
-  if ($('game').classList.contains('hidden')) {
+  if (!$('game').classList.contains('hidden')) {
+    setStatus(msg + ' (แตะที่จอเพื่อโหลดใหม่)');
+    $('status').style.pointerEvents = 'auto';
+    $('status').onclick = () => location.reload();
+  } else {
     $('err').textContent = msg;
     $('joinBtn').disabled = false;
     $('joinBtn').textContent = 'เข้าห้อง';
-    return;
+    try { if (ws) ws.close(); } catch (e) {}
   }
-  setStatus(msg + ' (แตะที่จอเพื่อโหลดใหม่)');
-  $('status').style.pointerEvents = 'auto';
-  $('status').onclick = () => location.reload();
 }
 
-function tryPlay() {
-  v.muted = false;
-  v.play().then(() => $('sound').classList.add('hidden')).catch(() => {
+async function onOffer(p) {
+  if (pc) pc.close();
+  pc = new RTCPeerConnection({ iceServers: ICE });
+  pc.ondatachannel = (e) => { dc = e.channel; };
+  pc.ontrack = (e) => {
+    v.srcObject = e.streams[0] || new MediaStream([e.track]);
+    try { if ('playoutDelayHint' in e.receiver) e.receiver.playoutDelayHint = 0; } catch (e1) {}
+    try { if ('jitterBufferTarget' in e.receiver) e.receiver.jitterBufferTarget = 0; } catch (e2) {}
     v.muted = true;
     v.play().catch(() => {});
-    $('sound').classList.remove('hidden');
-  });
+    setStatus('');
+  };
+  pc.onicecandidate = (e) => {
+    if (e.candidate) send('CANDIDATE', { t: 'ice', candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex });
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed') setStatus('เชื่อมต่อภาพไม่สำเร็จ ลองสลับ Wi-Fi/เน็ตมือถือ');
+    else if (pc.connectionState === 'disconnected') setStatus('สัญญาณสะดุด กำลังพยายามต่อใหม่…');
+    else if (pc.connectionState === 'connected') setStatus('');
+  };
+  await pc.setRemoteDescription({ type: 'offer', sdp: p.sdp });
+  for (const c of pending.splice(0)) await pc.addIceCandidate(c).catch(() => {});
+  const ans = await pc.createAnswer();
+  await pc.setLocalDescription(ans);
+  send('ANSWER', { t: 'sdp', type: 'answer', sdp: pc.localDescription.sdp });
 }
-$('sound').addEventListener('click', () => { v.muted = false; v.play(); $('sound').classList.add('hidden'); });
 
 // ---------- ปุ่มควบคุม ----------
 const held = new Set();
 function setBtn(b, down) {
   if (down === held.has(b)) return;
   down ? held.add(b) : held.delete(b);
-  send({ type: 'input', btn: b, down });
+  if (dc && dc.readyState === 'open') dc.send(JSON.stringify({ b, d: down ? 1 : 0 }));
 }
 document.querySelectorAll('[data-b]').forEach((el) => {
   const b = Number(el.dataset.b);
   const release = () => { el.classList.remove('on'); setBtn(b, false); };
   el.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    try { el.setPointerCapture(e.pointerId); } catch {}
+    try { el.setPointerCapture(e.pointerId); } catch (e1) {}
     el.classList.add('on');
     setBtn(b, true);
     if (navigator.vibrate) navigator.vibrate(8);
@@ -271,9 +260,19 @@ document.querySelectorAll('[data-b]').forEach((el) => {
   el.addEventListener('pointercancel', release);
   el.addEventListener('lostpointercapture', release);
 });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) [...held].forEach((b) => setBtn(b, false));
+  else if (joined) keepAwake();
+});
 document.addEventListener('contextmenu', (e) => e.preventDefault());
+$('sound').addEventListener('click', () => { v.muted = false; v.play(); $('sound').classList.add('hidden'); });
 
-// คีย์บอร์ด (เผื่อเล่นจากคอม)
+// โหมดเข้าห้องอัตโนมัติ (ใช้ตอนเปิดจากในแอป)
+if (params.get('auto') === '1' && params.get('room')) {
+  if (params.get('name')) $('name').value = params.get('name');
+  setTimeout(() => { $('joinForm').dispatchEvent(new Event('submit', { cancelable: true })); }, 400);
+}
+
 const KEYS = { ArrowUp: 4, ArrowDown: 5, ArrowLeft: 6, ArrowRight: 7, z: 0, x: 8, a: 1, s: 9, q: 10, w: 11, Enter: 3, Shift: 2 };
 addEventListener('keydown', (e) => { if (e.target.tagName === 'INPUT' || e.repeat) return; const b = KEYS[e.key]; if (b !== undefined) { e.preventDefault(); setBtn(b, true); } });
 addEventListener('keyup', (e) => { const b = KEYS[e.key]; if (b !== undefined) setBtn(b, false); });
